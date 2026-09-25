@@ -7,6 +7,7 @@ use App\Services\Archive\GoogleSheetsStagingService;
 use App\Services\Archive\OpenrecArchiveFetcher;
 use App\Services\Archive\ParticipantComputationService;
 use App\Services\Archive\ParticipantNameExtractor;
+use App\Services\Archive\StreamArchiveCollector;
 use App\Services\Archive\TwitcastingArchiveFetcher;
 use App\Services\Archive\TwitchArchiveFetcher;
 use App\Services\Archive\YoutubeArchiveFetcher;
@@ -36,6 +37,17 @@ class AppServiceProvider extends ServiceProvider
                 $app->make(ParticipantNameExtractor::class),
                 $app->make(GameGenreInferenceService::class),
                 $app->make(YoutubeMemberArchiveSyncService::class)
+            );
+        });
+
+        $this->app->bind(StreamArchiveCollector::class, function ($app) {
+            return new StreamArchiveCollector(
+                $app->make(YoutubeMemberArchiveSyncService::class),
+                [
+                    $app->make(TwitchArchiveFetcher::class),
+                    $app->make(TwitcastingArchiveFetcher::class),
+                    $app->make(OpenrecArchiveFetcher::class),
+                ]
             );
         });
     }
