@@ -5,9 +5,10 @@ namespace Tests\Feature\Archive;
 use App\Models\ArchiveSection;
 use App\Models\Member;
 use App\Models\Onedayarchive;
-use App\Models\StreamArchive;
+use App\Services\Archive\GoogleSheetsStreamArchiveStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -15,46 +16,32 @@ class StreamArchiveCollectorTest extends TestCase
 {
     use RefreshDatabase;
 
-    private string $taggedTitle = '【アルジャン】2次会';
+    private GoogleSheetsStreamArchiveStore $store;
 
     protected function setUp(): void
     {
         parent::setUp();
 
         config(['services.youtube.api_key' => 'test-key']);
+
+        // 実際のスプシの代わりに、追記された行をメモリ上に貯めるだけのフェイク。
+        $this->store = new class extends GoogleSheetsStreamArchiveStore {
+            public array $rows = [];
+
+            public function existingKeys(): Collection
+            {
+                return collect($this->rows)->map(fn (array $row) => $row[2] . ':' . $row[10]);
+            }
+
+            public function appendRows(Collection $rows): void
+            {
+                array_push($this->rows, ...$rows->values()->all());
+            }
+        };
+        $this->app->instance(GoogleSheetsStreamArchiveStore::class, $this->store);
     }
 
-    public function test_collects_all_live_archives_and_upserts_on_rerun(): void
-    {
-        Member::create(['name' => 'テスト配信者', 'youtube_channel_id' => 'UC_test']);
-
-        $this->fakeYoutube();
-        $this->artisan('archives:collect-streams', ['--from' => '2022-12-01', '--to' => '2023-01-31'])
-            ->assertExitCode(0);
-
-        $this->assertSame(2, StreamArchive::count());
-
-        $tagged = StreamArchive::where('video_id', 'tagged01')->first();
-        // 2022-12-31 01:00 JST開始 → 前日(12/30)のイベントの2次会
-        $this->assertSame('2022-12-30', $tagged->event_date->toDateString());
-        $this->assertSame('secondary', $tagged->estimated_section_type);
-        $this->assertTrue($tagged->has_arujan_tag);
-
-        $untagged = StreamArchive::where('video_id', 'untagged1')->first();
-        $this->assertSame('primary', $untagged->estimated_section_type);
-        $this->assertFalse($untagged->has_arujan_tag);
-
-        // 再実行しても重複せず、変わったタイトルは上書きされる。
-        Cache::flush();
-        $this->taggedTitle = '【アルジャン】2次会（改題）';
-        $this->artisan('archives:collect-streams', ['--from' => '2022-12-01', '--to' => '2023-01-31'])
-            ->assertExitCode(0);
-
-        $this->assertSame(2, StreamArchive::count());
-        $this->assertSame('【アルジャン】2次会（改題）', StreamArchive::where('video_id', 'tagged01')->value('title'));
-    }
-
-    public function test_exports_csv_with_registration_column(): void
+    public function test_appends_all_live_archives_to_sheet_without_duplicates(): void
     {
         $member = Member::create(['name' => 'テスト配信者', 'youtube_channel_id' => 'UC_test']);
 
@@ -65,25 +52,24 @@ class StreamArchiveCollectorTest extends TestCase
         $section->members()->attach($member->id, ['video_url' => 'https://youtu.be/tagged01']);
 
         $this->fakeYoutube();
-        $this->artisan('archives:collect-streams', ['--from' => '2022-12-01', '--to' => '2023-01-31']);
+        $this->artisan('archives:collect-streams', ['--from' => '2022-12-01', '--to' => '2023-01-31'])
+            ->assertExitCode(0);
 
-        $output = storage_path('framework/testing/stream-archives.csv');
+        $rows = array_map(fn (array $row) => array_slice($row, 0, 11), $this->store->rows);
 
-        $this->artisan('archives:export-streams', ['--output' => $output])->assertExitCode(0);
+        $this->assertSame([
+            // 2022-12-31 01:00 JST開始 → 前日(12/30)のイベントの2次会。DB登録済み
+            ['2022-12-30', '2022-12-31 01:00', 'youtube', 'テスト配信者', '【アルジャン】2次会', 'https://www.youtube.com/watch?v=tagged01', 120, 'あり', '2次会', '済', 'tagged01'],
+            // タグなしの配信も貯める
+            ['2023-01-05', '2023-01-05 21:30', 'youtube', 'テスト配信者', 'ソロ配信', 'https://www.youtube.com/watch?v=untagged1', 120, '', '1次会', '', 'untagged1'],
+        ], $rows);
 
-        $lines = array_map('str_getcsv', file($output, FILE_IGNORE_NEW_LINES));
-        @unlink($output);
+        // 期間を重ねて再実行しても、既にシートにある配信は追記しない。
+        Cache::flush();
+        $this->artisan('archives:collect-streams', ['--from' => '2022-12-01', '--to' => '2023-01-31'])
+            ->assertExitCode(0);
 
-        $this->assertSame("\xEF\xBB\xBFイベント日", $lines[0][0]);
-        $this->assertCount(3, $lines);
-        $this->assertSame(
-            ['2022-12-30', '2022-12-31 01:00', 'youtube', 'テスト配信者', '【アルジャン】2次会', 'https://www.youtube.com/watch?v=tagged01', '120', 'あり', '2次会', '済'],
-            $lines[1]
-        );
-        $this->assertSame(
-            ['2023-01-05', '2023-01-05 21:30', 'youtube', 'テスト配信者', 'ソロ配信', 'https://www.youtube.com/watch?v=untagged1', '120', '', '1次会', ''],
-            $lines[2]
-        );
+        $this->assertCount(2, $this->store->rows);
     }
 
     private function fakeYoutube(): void
@@ -95,8 +81,8 @@ class StreamArchiveCollectorTest extends TestCase
                 $this->playlistItem('uploaded1', '2023-01-06T12:00:00Z'),
                 $this->playlistItem('tooold01', '2022-11-01T12:00:00Z'),
             ]]),
-            'www.googleapis.com/youtube/v3/videos*' => fn () => Http::response(['items' => [
-                $this->liveVideo('tagged01', $this->taggedTitle, '2022-12-30T16:00:00Z'),
+            'www.googleapis.com/youtube/v3/videos*' => Http::response(['items' => [
+                $this->liveVideo('tagged01', '【アルジャン】2次会', '2022-12-30T16:00:00Z'),
                 // タグなしの配信も貯める
                 $this->liveVideo('untagged1', 'ソロ配信', '2023-01-05T12:30:00Z'),
                 // 生配信ではない通常アップロードは除外

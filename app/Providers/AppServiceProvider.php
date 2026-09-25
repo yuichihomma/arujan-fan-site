@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Services\Archive\ArchiveImportOrchestrator;
 use App\Services\Archive\GoogleSheetsStagingService;
+use App\Services\Archive\GoogleSheetsStreamArchiveStore;
 use App\Services\Archive\OpenrecArchiveFetcher;
 use App\Services\Archive\ParticipantComputationService;
 use App\Services\Archive\ParticipantNameExtractor;
@@ -43,6 +44,7 @@ class AppServiceProvider extends ServiceProvider
         $this->app->bind(StreamArchiveCollector::class, function ($app) {
             return new StreamArchiveCollector(
                 $app->make(YoutubeMemberArchiveSyncService::class),
+                $app->make(GoogleSheetsStreamArchiveStore::class),
                 [
                     $app->make(TwitchArchiveFetcher::class),
                     $app->make(TwitcastingArchiveFetcher::class),

@@ -3,7 +3,6 @@
 namespace App\Services\Archive;
 
 use App\Models\Member;
-use App\Models\StreamArchive;
 use App\Services\Archive\Contracts\PlatformArchiveFetcher;
 use App\Services\YoutubeMemberArchiveSyncService;
 use Carbon\Carbon;
@@ -12,8 +11,7 @@ use Illuminate\Support\Facades\DB;
 use Throwable;
 
 /**
- * 全メンバーの生配信アーカイブを「アルジャンタグの有無に関わらず」stream_archivesに貯め、
- * そこからスプシ仕分け用のCSVを書き出す。
+ * 全メンバーの生配信アーカイブを「アルジャンタグの有無に関わらず」スプシのall_streamsシートに貯める。
  * 1日ずつAPIで候補を取って即判定するのではなく、先に全件を貯めてから仕分けるための下準備。
  *
  * YouTubeだけはYoutubeArchiveFetcher（search.list: 1回100ユニット・約500件上限）を使わず、
@@ -24,19 +22,6 @@ use Throwable;
  */
 class StreamArchiveCollector
 {
-    public const CSV_HEADERS = [
-        'イベント日',
-        '配信開始',
-        'プラットフォーム',
-        '配信者',
-        'タイトル',
-        'URL',
-        '長さ(分)',
-        'アルジャンタグ',
-        '推定区分',
-        'DB登録済み',
-    ];
-
     private const SECTION_LABELS = [
         'pre' => '0次会',
         'primary' => '1次会',
@@ -55,19 +40,22 @@ class StreamArchiveCollector
      */
     public function __construct(
         private readonly YoutubeMemberArchiveSyncService $youtube,
+        private readonly GoogleSheetsStreamArchiveStore $store,
         private readonly array $otherFetchers,
     ) {
     }
 
     /**
-     * 指定期間の生配信アーカイブを取得してstream_archivesに保存する。platform+video_idで
-     * upsertするため、何度実行しても重複せず、タイトル等が変わっていれば最新の値で上書きされる。
+     * 指定期間の生配信アーカイブを取得してall_streamsシートに追記する。既にシートにある
+     * platform+video_idは追記しないため、何度実行しても（期間が重なっても）重複しない。
      *
      * @param callable(string $member, string $platform, string $message): void $onError
-     * @return int 保存（新規＋更新）した件数
+     * @return int 追記した件数
      */
     public function import(Collection $members, Carbon $from, Carbon $to, callable $onError): int
     {
+        $existingKeys = $this->store->existingKeys()->flip();
+        $registeredUrls = $this->registeredUrls();
         $saved = 0;
 
         foreach ($members as $member) {
@@ -91,111 +79,65 @@ class StreamArchiveCollector
                 }
             }
 
-            // メンバーごとに保存し、途中でAPIが失敗してもそこまでの取得分は残す。
-            $saved += $this->store($member, $videos);
+            $newVideos = $videos
+                ->unique(fn (array $video) => $video['platform'] . ':' . $video['video_id'])
+                ->reject(fn (array $video) => $existingKeys->has($video['platform'] . ':' . $video['video_id']))
+                ->sortBy(fn (array $video) => $video['published_at']->getTimestamp())
+                ->values();
+
+            // メンバーごとに追記し、途中でAPIが失敗してもそこまでの取得分は残す。
+            $this->store->appendRows($newVideos->map(fn (array $video) => $this->toSheetRow(
+                $member,
+                $video,
+                $registeredUrls->has($this->normalizeUrl($video['url']))
+            )));
+            $saved += $newVideos->count();
         }
 
         return $saved;
     }
 
-    /**
-     * stream_archivesの内容を、Excelで開いても文字化けしないUTF-8 BOM付きCSVで書き出す。
-     *
-     * @return int 書き出した件数
-     */
-    public function exportCsv(string $path, ?Carbon $from = null, ?Carbon $to = null): int
+    private function registeredUrls(): Collection
     {
-        $registeredUrls = DB::table('archive_section_member')
+        return DB::table('archive_section_member')
             ->whereNotNull('video_url')
             ->pluck('video_url')
             ->map(fn (string $url) => $this->normalizeUrl($url))
             ->flip();
-
-        $directory = dirname($path);
-
-        if (!is_dir($directory)) {
-            mkdir($directory, 0755, true);
-        }
-
-        $handle = fopen($path, 'w');
-        fwrite($handle, "\xEF\xBB\xBF");
-        fputcsv($handle, self::CSV_HEADERS, escape: '');
-
-        $count = 0;
-
-        StreamArchive::query()
-            ->with('member')
-            ->when($from, fn ($query) => $query->whereDate('event_date', '>=', $from->toDateString()))
-            ->when($to, fn ($query) => $query->whereDate('event_date', '<=', $to->toDateString()))
-            ->orderBy('started_at')
-            ->orderBy('id')
-            ->each(function (StreamArchive $archive) use ($handle, $registeredUrls, &$count) {
-                fputcsv($handle, [
-                    $archive->event_date->toDateString(),
-                    $archive->started_at->format('Y-m-d H:i'),
-                    $archive->platform,
-                    $archive->member?->name ?? '',
-                    $archive->title,
-                    $archive->url,
-                    $archive->duration_seconds !== null ? (int) round($archive->duration_seconds / 60) : '',
-                    $archive->has_arujan_tag ? 'あり' : '',
-                    self::SECTION_LABELS[$archive->estimated_section_type] ?? '',
-                    $registeredUrls->has($this->normalizeUrl($archive->url)) ? '済' : '',
-                ], escape: '');
-                $count++;
-            });
-
-        fclose($handle);
-
-        return $count;
     }
 
-    private function store(Member $member, Collection $videos): int
+    /**
+     * GoogleSheetsStreamArchiveStore::HEADER_ROWの順に並べた1行を作る。
+     */
+    private function toSheetRow(Member $member, array $video, bool $registered): array
     {
-        $timezone = config('app.timezone', 'Asia/Tokyo');
-        $now = now();
+        /** @var Carbon $startedAt */
+        $startedAt = $video['published_at']->copy()->setTimezone(config('app.timezone', 'Asia/Tokyo'));
+        $eventDayStart = $startedAt->copy()->startOfDay();
 
-        $rows = $videos
-            ->unique(fn (array $video) => $video['platform'] . ':' . $video['video_id'])
-            ->map(function (array $video) use ($member, $timezone, $now) {
-                /** @var Carbon $startedAt */
-                $startedAt = $video['published_at']->copy()->setTimezone($timezone);
-                $eventDayStart = $startedAt->copy()->startOfDay();
-
-                if ($startedAt->hour < self::EVENT_DAY_BOUNDARY_HOUR) {
-                    $eventDayStart->subDay();
-                }
-
-                return [
-                    'platform' => $video['platform'],
-                    'video_id' => (string) $video['video_id'],
-                    'member_id' => $member->id,
-                    'url' => $video['url'],
-                    'title' => mb_substr($video['title'] ?? '', 0, 255),
-                    'description' => $video['description'] ?? '',
-                    'started_at' => $startedAt->format('Y-m-d H:i:s'),
-                    'duration_seconds' => $video['duration_seconds'] ?? null,
-                    'event_date' => $eventDayStart->toDateString(),
-                    'estimated_section_type' => SectionTimeWindows::windowContaining($eventDayStart, $startedAt),
-                    'has_arujan_tag' => str_contains($video['title'] ?? '', 'アルジャン')
-                        || str_contains(DescriptionBoilerplateStripper::strip($video['description'] ?? ''), 'アルジャン'),
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ];
-            })
-            ->values();
-
-        if ($rows->isEmpty()) {
-            return 0;
+        if ($startedAt->hour < self::EVENT_DAY_BOUNDARY_HOUR) {
+            $eventDayStart->subDay();
         }
 
-        $rows->chunk(200)->each(fn (Collection $chunk) => StreamArchive::upsert(
-            $chunk->values()->all(),
-            ['platform', 'video_id'],
-            ['member_id', 'url', 'title', 'description', 'started_at', 'duration_seconds', 'event_date', 'estimated_section_type', 'has_arujan_tag', 'updated_at']
-        ));
+        $sectionType = SectionTimeWindows::windowContaining($eventDayStart, $startedAt);
+        $hasTag = str_contains($video['title'] ?? '', 'アルジャン')
+            || str_contains(DescriptionBoilerplateStripper::strip($video['description'] ?? ''), 'アルジャン');
+        $durationSeconds = $video['duration_seconds'] ?? null;
 
-        return $rows->count();
+        return [
+            $eventDayStart->toDateString(),
+            $startedAt->format('Y-m-d H:i'),
+            $video['platform'],
+            $member->name,
+            $video['title'] ?? '',
+            $video['url'],
+            $durationSeconds !== null ? (int) round($durationSeconds / 60) : '',
+            $hasTag ? 'あり' : '',
+            self::SECTION_LABELS[$sectionType] ?? '',
+            $registered ? '済' : '',
+            (string) $video['video_id'],
+            now()->format('Y-m-d H:i'),
+        ];
     }
 
     private function fetchYoutube(Member $member, Carbon $from, Carbon $to): Collection

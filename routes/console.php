@@ -30,7 +30,7 @@ Schedule::command('youtube:sync-member-archives --days=3')
     ->withoutOverlapping();
 
 // TwitchのVOD（約60日で失効）やOPENREC（最新20件のみ）を消える前に記録するため、
-// タグの有無に関わらず全メンバーの直近の配信アーカイブを毎日stream_archivesに貯める。
+// タグの有無に関わらず全メンバーの直近の配信アーカイブを毎日スプシのall_streamsシートに貯める。
 Schedule::command('archives:collect-streams --days=3')
     ->dailyAt('12:30')
     ->withoutOverlapping();
@@ -950,29 +950,10 @@ Artisan::command('archives:collect-streams
             $this->warn("[{$platform}] {$member}: {$message}");
         });
 
-        $this->info("{$saved}件をstream_archivesに保存しました（既存分は上書き）。");
+        $this->info("{$saved}件をスプシのall_streamsシートに追記しました（既にある配信はスキップ）。");
 
         return 0;
-    })->purpose('Collect every member\'s live-stream archives (with or without the Arujan tag) into stream_archives');
-
-Artisan::command('archives:export-streams
-    {--from= : Event date from, in YYYY-MM-DD}
-    {--to= : Event date to, in YYYY-MM-DD}
-    {--output= : Output CSV path (defaults to storage/app/exports/stream-archives-YYYYmmdd-His.csv)}', function (StreamArchiveCollector $collector) {
-        $timezone = config('app.timezone', 'Asia/Tokyo');
-        $output = $this->option('output')
-            ?: storage_path('app/exports/stream-archives-' . Carbon::now($timezone)->format('Ymd-His') . '.csv');
-
-        $count = $collector->exportCsv(
-            $output,
-            $this->option('from') ? Carbon::parse($this->option('from'), $timezone) : null,
-            $this->option('to') ? Carbon::parse($this->option('to'), $timezone) : null,
-        );
-
-        $this->info("{$count}件を書き出しました: {$output}");
-
-        return 0;
-    })->purpose('Export stream_archives to a CSV for sorting in a spreadsheet');
+    })->purpose('Collect every member\'s live-stream archives (with or without the Arujan tag) into the all_streams Google Sheet');
 
 // routes/console.phpはテスト実行時など、同一PHPプロセス内でLaravelアプリケーションが
 // 複数回ブートストラップされるたびに再require()される。トップレベル関数宣言は
