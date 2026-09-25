@@ -9,6 +9,7 @@ use App\Models\Member;
 use App\Models\Onedayarchive;
 use App\Models\Role;
 use App\Services\Archive\Contracts\PlatformArchiveFetcher;
+use App\Services\Archive\StreamArchiveCollector;
 use App\Services\Archive\ParticipantComputationService;
 use App\Services\Archive\SectionTimeWindows;
 use App\Services\Archive\TwitchArchiveFetcher;
@@ -26,6 +27,12 @@ Artisan::command('inspire', function () {
 // 昼過ぎの時間帯に、直近3日分だけ差分同期する。
 Schedule::command('youtube:sync-member-archives --days=3')
     ->dailyAt('12:00')
+    ->withoutOverlapping();
+
+// TwitchのVOD（約60日で失効）やOPENREC（最新20件のみ）を消える前に記録するため、
+// タグの有無に関わらず全メンバーの直近の配信アーカイブを毎日スプシのall_streamsシートに貯める。
+Schedule::command('archives:collect-streams --days=3')
+    ->dailyAt('12:30')
     ->withoutOverlapping();
 
 Artisan::command('youtube:sync-member-archives
@@ -906,6 +913,47 @@ Artisan::command('archives:auto-extract-participants
 
         return 0;
     })->purpose('Auto-run the "extract game content and participants" logic across a date range and persist results, flagging unconfirmed video URLs for review');
+
+Artisan::command('archives:collect-streams
+    {--from= : Start date in YYYY-MM-DD (e.g. 2022-12-01 for the initial backfill)}
+    {--to= : End date in YYYY-MM-DD (defaults to now)}
+    {--days=3 : Number of recent days to collect when --from is omitted}
+    {--member= : Member ID or exact member name}', function (StreamArchiveCollector $collector) {
+        $timezone = config('app.timezone', 'Asia/Tokyo');
+        $to = $this->option('to')
+            ? Carbon::parse($this->option('to'), $timezone)->endOfDay()
+            : Carbon::now($timezone);
+        $from = $this->option('from')
+            ? Carbon::parse($this->option('from'), $timezone)->startOfDay()
+            : Carbon::now($timezone)->subDays((int) $this->option('days'))->startOfDay();
+
+        $members = Member::query()
+            ->when($this->option('member'), function ($query, string $member) {
+                if (ctype_digit($member)) {
+                    $query->whereKey((int) $member);
+                } else {
+                    $query->where('name', $member);
+                }
+            })
+            ->orderBy('id')
+            ->get();
+
+        if ($members->isEmpty()) {
+            $this->error('対象メンバーが見つかりません。');
+
+            return 1;
+        }
+
+        $this->info("{$members->count()}人分の配信アーカイブを {$from->toDateString()} 〜 {$to->toDateString()} で取り込みます。");
+
+        $saved = $collector->import($members, $from, $to, function (string $member, string $platform, string $message) {
+            $this->warn("[{$platform}] {$member}: {$message}");
+        });
+
+        $this->info("{$saved}件をスプシのall_streamsシートに追記しました（既にある配信はスキップ）。");
+
+        return 0;
+    })->purpose('Collect every member\'s live-stream archives (with or without the Arujan tag) into the all_streams Google Sheet');
 
 // routes/console.phpはテスト実行時など、同一PHPプロセス内でLaravelアプリケーションが
 // 複数回ブートストラップされるたびに再require()される。トップレベル関数宣言は
