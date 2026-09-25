@@ -1,0 +1,21 @@
+.calendar-page {
+    background: #e9f6ff;
+    padding: 40px;
+    border-radius: 15px;
+}
+
+.date-form {
+    display: flex;
+    gap: 10px;
+}
+
+.stream-list {
+    margin-top: 20px;
+}
+
+.stream-item {
+    background: white;
+    padding: 15px;
+    border-radius: 10px;
+    margin-bottom: 10px;
+}

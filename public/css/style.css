@@ -1,0 +1,81 @@
+/* 全体背景 */
+body {
+    background: #d8f0ff;
+    /* STU48 風の淡い水色 */
+    margin: 0;
+    font-family: 'Helvetica Neue', sans-serif;
+}
+
+/* 🔵 ヘッダー全体 */
+.site-header {
+    width: 100%;
+    padding: 15px 40px;
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(6px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: fixed;
+    /* 上に固定 */
+    top: 0;
+    z-index: 100;
+}
+
+/* 左側ロゴ */
+.logo {
+    font-size: 24px;
+    font-weight: bold;
+    font-family: 'AnzuMoji', sans-serif;
+    color: #1c4fa1;
+    margin: 0;
+}
+
+/* 🔵 中央メニュー */
+.header-nav ul {
+    list-style: none;
+    display: flex;
+    gap: 25px;
+    margin: 0;
+    padding: 0;
+}
+
+.header-nav a {
+    text-decoration: none;
+    color: #1c4fa1;
+    font-weight: 600;
+    font-size: 14px;
+    transition: opacity 0.3s;
+}
+
+.header-nav a:hover {
+    opacity: 0.6;
+}
+
+/* 🔵 右側ボタン */
+.header-right {
+    display: flex;
+    gap: 12px;
+}
+
+.btn-join,
+.btn-login {
+    padding: 6px 18px;
+    border-radius: 20px;
+    border: 2px solid #1c4fa1;
+    background: white;
+    color: #1c4fa1;
+    cursor: pointer;
+    transition: 0.3s;
+    font-size: 13px;
+}
+
+.btn-join:hover,
+.btn-login:hover {
+    background: #1c4fa1;
+    color: white;
+}
+
+/* トップの固定ヘッダー分の余白 */
+.content {
+    padding-top: 100px;
+}
